@@ -73,7 +73,7 @@ def generate_batches_from_hdf5_file(cfg, filepath, f_size=None, zero_center_imag
 
             # Get labels for the nn. Since the labels are same for all the multiple files, use the first file.
             y_values = f[0]['y'][n_entries:n_entries+batchsize]
-            ys = get_labels(y_values, class_type)
+            ys = get_labels(y_values, class_type,batchsize)
 
             # we have read one more batch from this file
             n_entries += batchsize
@@ -200,7 +200,7 @@ def get_input_images(xs, n_files, swap_col, str_ident):
     return xs_list
 
 
-def get_labels(y_values, class_type):
+def get_labels(y_values, class_type,batchsize):
     """
     TODO add docs
 
@@ -284,10 +284,25 @@ def get_labels(y_values, class_type):
         categorical_ts[is_muon_cc][:, 1] = 1
 
         ys['ts_output'] = categorical_ts.astype(np.float32)
-
+	
+    elif class_type[1] == 'charged-neutral':
+    	
+        # {(12, 0): 0, (12, 1): 1, (14, 1): 2, (16, 1): 3}  # 0: elec_NC, 1: elec_CC, 2: muon_CC,     3: tau_CC
+        # label is elec-CC, or elec-NC
+ 
+        particle_type, is_cc = y_values['particle_type'], y_values['is_cc']
+        is_elec_cc = np.logical_and(np.abs(particle_type) == 12, is_cc == 1)
+        is_elec_nc = np.logical_and(np.abs(particle_type) == 12, is_cc == 0)
+ 
+        categorical_cn = np.zeros((batchsize,2), dtype='bool')  # categorical [charged, neutral]     -> [1,0] = charged, [0,1] = neutral
+        categorical_cn[is_elec_cc][:,0] = 1
+        categorical_cn[is_elec_nc][:,1] = 1
+ 
+        ys['cn_output'] = categorical_cn.astype(np.float32)
+ 
     else:
-        raise ValueError('The label ' + str(class_type[1]) + ' in class_type[1] is not available.')
-
+    	raise ValueError('The label ' + str(class_type[1]) + ' in class_type[1] is not available.    ')
+ 
     return ys
 
 

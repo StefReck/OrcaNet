@@ -268,7 +268,11 @@ def add_dense_layers_to_cnn(conv_output_flat, class_type, dropout=0, activation=
     if class_type[1] == 'track-shower':  # categorical problem
         x = Dense(nb_classes, activation='softmax', kernel_initializer='he_normal', name='ts_output')(x)
         outputs.append(x)
-
+    
+    elif class_type[1] == 'charged-neutral':  # categorical problem
+        x = Dense(2, activation='softmax', kernel_initializer='he_normal', name='cn_output')(x)
+        outputs.append(x)
+    
     else:  # regression case, one output for each regression label
 
         if class_type[1] == 'energy_dir_bjorken-y_errors':
