@@ -28,11 +28,9 @@ copyright = u'{0}, Michael Moser and Stefan Reck'.format(date.today().year)
 author = 'Michael Moser and Stefan Reck'
 
 # The full version, including alpha/beta/rc tags
-release = ''
-#release = get_distribution('orcanet').version
+release = get_distribution('orcanet').version
 # The short X.Y version
-version = ''
-#version = '.'.join(release.split('.')[:2])
+version = '.'.join(release.split('.')[:2])
 
 
 # -- General configuration ---------------------------------------------------
@@ -107,10 +105,10 @@ html_theme = 'sphinx_rtd_theme'
 
 # The name of an image file (relative to this directory) to place at the top
 # of the sidebar.
-# html_theme_options = {
-#     'logo_only': True,
-# }
-# html_logo = "_static/orcasong_wide_transparent_white.png"
+html_theme_options = {
+    'logo_only': True,
+}
+html_logo = "_static/orcanet_wide_transparent_white.png"
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
