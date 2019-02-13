@@ -199,10 +199,14 @@ def orca_label_modifiers(class_type):
             is_elec_cc = np.logical_and(np.abs(particle_type) == 12, is_cc == 1)
             is_elec_nc = np.logical_and(np.abs(particle_type) == 12, is_cc == 0)
 
+            batchsize = y_values.shape[0]
             categorical_cn = np.zeros((batchsize,2), dtype='bool')  # categorical [charged, neutral]     -> [1,0] = charged, [0,1] = neutral
 
-            np.place(categorical_cn[:,0], is_elec_cc, 1)
-            np.place(categorical_cn[:,1], is_elec_nc, 1)
+            categorical_cn[:, 0] = is_elec_cc
+            categorical_cn[:, 1] = is_elec_nc
+
+#            np.place(categorical_cn[:,0], is_elec_cc, 1)
+#            np.place(categorical_cn[:,1], is_elec_nc, 1)
 
             ys['cn_output'] = categorical_cn.astype(np.float32)
             return ys
