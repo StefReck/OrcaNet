@@ -6,47 +6,46 @@ Core scripts for the OrcaNet package.
 
 import os
 import warnings
-from collections import namedtuple
 import keras as ks
+import toml
 
-from orcanet.run_nn import train_and_validate_model
-from orcanet.eval_nn import predict_and_investigate_model_performance, get_modelname
-from orcanet.utilities.input_output_utilities import read_out_list_file, read_out_config_file, read_out_model_file, use_node_local_ssd_for_input, h5_get_n_bins, write_full_logfile_startup
-from orcanet.utilities.nn_utilities import load_zero_center_data
-from orcanet.utilities.losses import get_all_loss_functions
+from orcanet.backend import train_and_validate_model, make_model_prediction
+from orcanet.in_out import read_out_list_file, use_node_local_ssd_for_input, write_full_logfile_startup, IOHandler
+from orcanet.utilities.nn_utilities import load_zero_center_data, get_auto_label_modifier
 
 
 class Configuration(object):
     """
     Container object for all the configurable options in the OrcaNet scripts.
 
+    TODO add a clober script that properly deletes models + logfiles
     Sensible default values were chosen for the settings.
     You can change the all of these public attributes (the ones without a leading underscore _) either directly or with a
-    .toml config file via the method set_from_config_file().
+    .toml config file via the method update_config().
 
     Attributes
     ----------
-    main_folder : str
-        Name of the folder of this model in which everything will be saved, e.g., the summary.txt log file is located in here.
-        Has a '/' at the end.
     batchsize : int
-        Batchsize that should be used for the training / inferencing of the cnn.
-    class_type : tuple(int, str)
-        Declares the number of output classes / regression variables and a string identifier to specify the exact output classes.
-        I.e. (2, 'track-shower')
+        Batchsize that should be used for the training and validation of the network.
+    custom_objects : dict or None
+        Optional dictionary mapping names (strings) to custom classes or functions to be considered by keras
+        during deserialization of models.
+    dataset_modifier : function or None
+        For orca_eval: Function that determines which datasets get created in the resulting h5 file.
+        If none, every output layer will get one dataset each for both the label and the prediction, and one dataset
+        containing the mc_info from the validation files.
     filter_out_tf_garbage : bool
         If true, surpresses the tensorflow info logs which usually spam the terminal.
-    epochs_to_train : int
-        How many new epochs should be trained by running this function. -1 for infinite.
-    initial_epoch : int
-        The epoch of the model with which the training is supposed to start, e.g. 1 means load the saved model from
-        epoch 1 and continue training. 0 means start a new training (initial_fileno also has to be 0 for this).
-        Can also give -1 to automatically load the most recent epoch found in the main folder, if present, or make
-        a new model otherwise.
-    initial_fileno : int
-        When using multiple files, define the file number with which the training is supposed to start, e.g.
-        1 for load the model trained on the first file. If both epoch and fileno are -1, automatically set to the most
-        recent file found in the main folder.
+    epochs_to_train : int or None
+        How many new epochs should be trained by running this function. None for infinite.
+    key_samples : str
+        The name of the datagroup in your h5 input files which contains the samples for the network.
+    key_labels : str
+        The name of the datagroup in your h5 input files which contains the labels for the network.
+    label_modifier : function or None
+        Operation to be performed on batches of labels read from the input files before they are fed into the model.
+        If None is given, all labels with the same name as the output layers will be passed to the model as a dict,
+        with the keys being the dtype names.
     learning_rate : float or tuple or function
         The learning rate for the training.
         If it is a float, the learning rate will be constantly this value.
@@ -54,23 +53,25 @@ class Configuration(object):
         float gives the decrease of the learning rate per file (e.g. 0.1 for 10% decrease per file).
         You can also give an arbitrary function, which takes as an input the epoch, the file number and the
         Configuration object (in this order), and returns the learning rate.
+    max_queue_size : int
+        max_queue_size option of the keras training and evaluation generator methods. How many batches get preloaded
+        from the generator.
     n_events : None or int
-        For testing purposes. If not the whole .h5 file should be used for training, define the number of events.
-    n_gpu : tuple(int, str)
-        Number of gpu's that the model should be parallelized to [0] and the multi-gpu mode (e.g. 'avolkov') [1].
-    str_ident : str
-        Optional string identifier that gets appended to the modelname. Useful when training models which would have
-        the same modelname. Also used for defining models and projections!
-    swap_4d_channels : None or str
-        For 4D data input (3.5D models). Specifies, if the channels of the 3.5D net should be swapped.
-        Currently available: None -> XYZ-T ; 'yzt-x' -> YZT-X, TODO add multi input options
+        For testing purposes. If not the whole .h5 file should be used for training, define the number of samples.
+    sample_modifier : function or None
+        Operation to be performed on batches of samples read from the input files before they are fed into the model.
+    shuffle_train : bool
+        If true, the order in which batches are read out from the files during training are randomized each time they
+        are read out.
     train_logger_display : int
         How many batches should be averaged for one line in the training log files.
     train_logger_flush : int
         After how many lines the training log file should be flushed (updated on the disk).
         -1 for flush at the end of the file only.
+    output_folder : str
+        Name of the folder of this model in which everything will be saved, e.g., the summary.txt log file is located in here.
     use_scratch_ssd : bool
-        Declares if the input files should be copied to the node-local SSD scratch space (only working at Erlangen CC).
+        Only working at HPC Erlangen: Declares if the input files should be copied to the node-local SSD scratch space.
     validate_after_n_train_files : int
         Validate the model after this many training files have been trained on in an epoch, starting from the first.
         E.g. if validate_after_n_train_files == 3, validation will happen after file 1,4,7,...
@@ -85,38 +86,8 @@ class Configuration(object):
         If this path is set, zero centering images for the given dataset will either be calculated and saved
         automatically at the start of the training, or loaded if they have been saved before.
 
-    Private attributes
-    ------------------
-    _train_files : list or None
-        A list containing the paths to the different training files on which the model will be trained on.
-        Example for the output format:
-                [
-                 [['path/to/train_file_1_dimx.h5', 'path/to/train_file_1_dimy.h5'], number_of_events_train_files_1],
-                 [['path/to/train_file_2_dimx.h5', 'path/to/train_file_2_dimy.h5'], number_of_events_train_files_2],
-                 ...
-                ]
-    _val_files : list or None
-        Like train_files but for the validation files.
-    _multiple_inputs : bool or None
-        Whether seperate sets of input files were given (e.g. for networks taking data
-        simulataneosly from different files).
-    _list_file : str or None
-        Path to the list file that was used to set the training and validation files. Is None if no list file
-        has been used yet.
-    _modeldata : namedtuple or None
-        Optional info only required for building a predefined model with OrcaNet. [default: None]
-        It is not needed for executing orcatrain. It is set via self.load_from_model_file.
-
-        modeldata.nn_arch : str
-            Architecture of the neural network. Currently, only 'VGG' or 'WRN' are available.
-        modeldata.loss_opt : tuple(dict, dict/str/None,)
-            Tuple that contains 1) the loss_functions and loss_weights as dicts (this is the losses table from the toml file)
-            and 2) the metrics.
-        modeldata.args : dict
-            Keyword arguments for the model generation.
-
     """
-    def __init__(self, main_folder, list_file=None, config_file=None):
+    def __init__(self, output_folder, list_file, config_file):
         """
         Set the attributes of the Configuration object.
 
@@ -124,26 +95,27 @@ class Configuration(object):
 
         Parameters
         ----------
-        main_folder : str
+        output_folder : str
             Name of the folder of this model in which everything will be saved, e.g., the summary.txt log file is located in here.
         list_file : str or None
-            Path to a list file with pathes to all the h5 files that should be used for training and validation.
+            Path to a toml list file with pathes to all the h5 files that should be used for training and validation.
         config_file : str or None
-            Path to the config file with attributes that are used instead of the default ones.
+            Path to a toml config file with attributes that are used instead of the default ones.
 
         """
-        # Configuration:
         self.batchsize = 64
-        self.class_type = ['None', 'energy_dir_bjorken-y_vtx_errors']
-        self.epochs_to_train = -1
+        self.custom_objects = None
+        self.dataset_modifier = None
+        self.epochs_to_train = None
         self.filter_out_tf_garbage = True
-        self.initial_epoch = -1
-        self.initial_fileno = -1
+        self.key_samples = "x"
+        self.key_labels = "y"
+        self.label_modifier = None
         self.learning_rate = 0.001
+        self.max_queue_size = 10
         self.n_events = None
-        self.n_gpu = (1, 'avolkov')
-        self.str_ident = ''
-        self.swap_4d_channels = None
+        self.sample_modifier = None
+        self.shuffle_train = False
         self.train_logger_display = 100
         self.train_logger_flush = -1
         self.use_scratch_ssd = False
@@ -155,237 +127,210 @@ class Configuration(object):
         self._default_values = dict(self.__dict__)
 
         # Main folder:
-        if main_folder[-1] == "/":
-            self.main_folder = main_folder
+        if output_folder[-1] == "/":
+            self.output_folder = output_folder
         else:
-            self.main_folder = main_folder+"/"
+            self.output_folder = output_folder+"/"
 
         # Private attributes:
+        self._auto_label_modifier = None
         self._train_files = None
         self._val_files = None
-        self._multiple_inputs = None
         self._list_file = None
-        self._modeldata = None
 
         # Load the optionally given list and config files.
         if list_file is not None:
-            self.set_from_list_file(list_file)
+            self.import_list_file(list_file)
         if config_file is not None:
-            self.set_from_config_file(config_file)
+            self.update_config(config_file)
 
-    def set_from_list_file(self, list_file):
-        """ Set filepaths to the ones given in a list file. """
-        if self._list_file is None:
-            self._train_files, self._val_files, self._multiple_inputs = read_out_list_file(list_file)
-            # Save internally which path was used to load the info
-            self._list_file = list_file
-        else:
-            raise AssertionError("You tried to load filepathes from a list file, but pathes have already been loaded \
-            for this object. (From the file " + self._list_file + ")\nYou should not use \
-            two different list files for one Configuration object!")
-
-    def set_from_config_file(self, config_file):
-        """ Overwrite default attribute values with values from a config file. """
-        user_values = read_out_config_file(config_file)
-        for key in user_values:
-            if hasattr(self, key):
-                setattr(self, key, user_values[key])
-            else:
-                raise AssertionError("You tried to set the attribute "+str(key)+" in your config file\n"
-                                     + config_file + "\n, but this attribute is not provided. Check \
-                                     the possible attributes in the definition of the Configuration class.")
-
-    def set_from_model_file(self, model_file):
-        """ Set attributes for generating models with OrcaNet. """
-        nn_arch, loss_opt, args = read_out_model_file(model_file)
-        ModelData = namedtuple("ModelData", "nn_arch loss_opt args")
-        data = ModelData(nn_arch, loss_opt, args)
-        self._modeldata = data
-
-    def get_latest_epoch(self):
+    def import_list_file(self, list_file):
         """
-        Check all saved models in the ./saved_models folder and return the highest epoch / file_no pair.
-
-        Returns
-        -------
-        latest_epoch : tuple
-            The highest epoch, file_no pair. (0,0) if the folder is empty or does not exist yet.
-
-        """
-        if os.path.exists(self.main_folder + "saved_models"):
-            files = os.listdir(self.main_folder + "saved_models")
-            if len(files) == 0:
-                latest_epoch = (0, 0)
-            else:
-                epochs = []
-                for file in files:
-                    epoch, file_no = file.split("model_epoch_")[-1].split(".h5")[0].split("_file_")
-                    epochs.append((int(epoch), int(file_no)))
-                latest_epoch = max(epochs)
-        else:
-            latest_epoch = (0, 0)
-        return latest_epoch
-
-    def get_next_epoch(self, epoch):
-        """
-        Return the next epoch / fileno tuple (depends on how many train files there are).
+        Set filepaths to the ones given in a list file.
 
         Parameters
         ----------
-        epoch : tuple
-            Current epoch and file number.
+        list_file : str or None
+            Path to a toml list file with pathes to all the h5 files that should be used for training and validation.
+
+        """
+        assert self._list_file is None, "You tried to load filepathes from a list file, but pathes have already " \
+                                            "been loaded for this object. (From the file " + self._list_file \
+                                            + ")\nYou can not use two different list files at once!"
+        self._train_files, self._val_files = read_out_list_file(list_file)
+        self._list_file = list_file
+
+    def update_config(self, config_file):
+        """
+        Update the default configuration with values from a config file.
+
+        Parameters
+        ----------
+        config_file : str
+            Path to a toml config file with attribute values to use instead of the default ones.
+
+        """
+        user_values = toml.load(config_file)["config"]
+        for key in user_values:
+            assert hasattr(self, key), "Unknown attribute "+str(key)+" in config file " + config_file
+            setattr(self, key, user_values[key])
+
+    def get_list_file(self):
+        """
+        Returns the path to the list file that was used to set the training and validation files.
+        None if no list file has been used.
+        """
+        return self._list_file
+
+    def get_files(self, which):
+        """
+        Get the training file paths.
 
         Returns
         -------
-        next_epoch : tuple
-            Next epoch and file number.
-
+        dict
+            A dict containing the paths to the training or validation files on which the model will be trained on.
+            Example for the format for two input sets with two files each:
+                    {
+                     "input_A" : ('path/to/set_A_file_1.h5', 'path/to/set_A_file_2.h5'),
+                     "input_B" : ('path/to/set_B_file_1.h5', 'path/to/set_B_file_2.h5'),
+                    }
         """
-        if epoch[0] == 0 and epoch[1] == 0:
-            next_epoch = (1, 1)
-        elif epoch[1] == len(self.get_train_files()):
-            next_epoch = (epoch[0] + 1, 1)
+        if which == "train":
+            assert self._train_files is not None, "No train files have been specified!"
+            return self._train_files
+        elif which == "val":
+            assert self._val_files is not None, "No validation files have been specified!"
+            return self._val_files
         else:
-            next_epoch = (epoch[0], epoch[1] + 1)
-        return next_epoch
+            raise NameError("Unknown fileset name ", which)
 
     def use_local_node(self):
         """
         Copies the test and val files to the node-local ssd scratch folder and sets the new filepaths of the train and val data.
         Speeds up I/O and reduces RRZE network load.
         """
-        train_files_ssd, test_files_ssd = use_node_local_ssd_for_input(self.get_train_files(), self.get_val_files(), self.get_multiple_inputs())
+        train_files_ssd, val_files_ssd = use_node_local_ssd_for_input(self.get_files("train"), self.get_files("val"))
         self._train_files = train_files_ssd
-        self._val_files = test_files_ssd
+        self._val_files = val_files_ssd
 
-    def make_folder_structure(self):
+
+class OrcaHandler:
+    def __init__(self, output_folder, list_file=None, config_file=None):
+        self.cfg = Configuration(output_folder, list_file, config_file)
+        self.io = IOHandler(self.cfg)
+
+    def train(self, model=None, force_model=False):
         """
-        Make subfolders for a specific model if they don't exist already. These subfolders will contain e.g. saved models,
-        logfiles, etc.
+        Core code that trains a neural network.
+
+        Set up everything for the training (like the folder structure and potentially loading in a saved model)
+        and train for the given number of epochs.
+
+        Parameters
+        ----------
+        model : ks.models.Model or None
+            Compiled keras model to use for training and validation. Required for the first epoch of training, as
+            the most recent saved model will be loaded otherwise. Also required, if you use the force_model parameter.
+        force_model : bool
+            Use the keras model specified in the "model" parameter and don't load the most recently trained model
+            from the disk.
 
         """
-        main_folder = self.main_folder
-        folders_to_create = [main_folder + "log_train", main_folder + "saved_models",
-                             main_folder + "plots/activations", main_folder + "predictions"]
-        for directory in folders_to_create:
-            if not os.path.exists(directory):
-                print("Creating directory: " + directory)
-                os.makedirs(directory)
+        if self.cfg.get_list_file() is None:
+            raise ValueError("No files specified. You need to load a toml list file with your files before training")
 
-    def get_n_bins(self):
-        return h5_get_n_bins(self._train_files)
+        if self.cfg.filter_out_tf_garbage:
+            os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
+        self.io.get_subfolder(create=True)
+        write_full_logfile_startup(self)
+        # the epoch of the currently existing model (or 0,0 if there is none)
+        epoch = self.io.get_latest_epoch()
+        print("Set to epoch {} file {}.".format(epoch[0], epoch[1]))
 
-    def get_default_values(self):
-        """ Return default values of common settings. """
-        return self._default_values
+        if epoch[0] == 0 and epoch[1] == 0:
+            if model is None:
+                raise ValueError("You need to provide a compiled keras model for the start of the training! (You gave None)")
+            model = model
+        elif force_model is True:
+            if model is None:
+                raise ValueError('You set "force_model" to True, but didnt provide a model in "model" that should be used!')
+            print('You forced the OrcaHandler.train() method to use a keras model specified with the parameter "forced_model"!')
+            model = model
+        else:
+            # Load an existing model
+            if model is not None:
+                raise ValueError("You provided a model even though this is not the start of the training. Provided model is ignored!")
+            path_of_model = self.io.get_model_path(epoch[0], epoch[1])
+            print("Loading saved model: " + path_of_model)
+            model = ks.models.load_model(path_of_model, custom_objects=self.cfg.custom_objects)
 
-    def get_train_files(self):
-        return self._train_files
+        if self.cfg.label_modifier is None:
+            self.cfg._auto_label_modifier = get_auto_label_modifier(model)
 
-    def get_val_files(self):
-        return self._val_files
+        self.io.check_connections(model)
+        # model.summary()
+        if self.cfg.use_scratch_ssd:
+            self.cfg.use_local_node()
 
-    def get_multiple_inputs(self):
-        # TODO Remove this attribute and make it a function instead
-        return self._multiple_inputs
+        trained_epochs = 0
+        while self.cfg.epochs_to_train is None or trained_epochs < self.cfg.epochs_to_train:
+            # Set epoch to the next file
+            epoch = self.io.get_next_epoch(epoch)
+            train_and_validate_model(self, model, epoch)
+            trained_epochs += 1
 
-    def get_modeldata(self):
-        return self._modeldata
+    def predict(self, epoch=-1, fileno=-1):
+        """
+        Make a prediction if it does not exist yet, and return its filepath.
 
-    def get_list_file(self):
-        return self._list_file
+        Load a model, let it predict on all samples of the validation set in the toml list, and save it as a h5 file.
+        The cfg.eval_epoch and cfg.eval_fileno parameters define which model is loaded.
 
+        Parameters
+        ----------
+        epoch : int
+            The epoch of the model to load for prediction
+            Can also give -1 to automatically load the most recent epoch found in the main folder.
+        fileno : int
+            When using multiple files, define the file number for the prediction, e.g.
+            1 for load the model trained on the first file. If both epoch and fileno are -1, automatically set to the most
+            recent file found in the main folder.
 
-def orca_train(cfg, initial_model=None):
-    """
-    Core code that trains a neural network.
+        Returns
+        -------
+        pred_filename : str
+            The path to the created prediction file.
 
-    Set up everything for the training (like the folder structure and potentially loading in a saved model)
-    and train for the given number of epochs.
+        """
+        assert self.cfg.get_list_file() is not None, "No files specified. You need to load a toml list file " \
+                                                     "with your files before predicting or loading a prediction"
 
-    Parameters
-    ----------
-    cfg : object Configuration
-        Configuration object containing all the configurable options in the OrcaNet scripts.
-    initial_model : ks.models.Model or None
-        Compiled keras model to use for training and validation. Only required for the first epoch of training, as
-        the most recent saved model will be loaded otherwise.
+        if self.cfg.filter_out_tf_garbage:
+            os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
-    """
-    if cfg.filter_out_tf_garbage:
-        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
-    cfg.make_folder_structure()
-    write_full_logfile_startup(cfg)
-    # The epoch that will be incremented during the scripts:
-    epoch = (cfg.initial_epoch, cfg.initial_fileno)
-    if epoch[0] == -1 and epoch[1] == -1:
-        epoch = cfg.get_latest_epoch()
-        print("Automatically set epoch to epoch {} file {}.".format(epoch[0], epoch[1]))
-    # Epoch here is the epoch of the currently existing model (or 0,0 if there is none)
-    if epoch[0] == 0 and epoch[1] == 0:
-        assert initial_model is not None, "You need to provide a compiled keras model for the start of the training! (You gave None)"
-        model = initial_model
-    else:
-        # Load an existing model
-        if initial_model is not None:
-            warnings.warn("You provided a model even though this is not the start of the training. Provided model is ignored!")
-        path_of_model = cfg.main_folder + 'saved_models/model_epoch_' + str(epoch[0]) + '_file_' + str(epoch[1]) + '.h5'
-        print("Loading saved model: "+path_of_model)
-        model = ks.models.load_model(path_of_model, custom_objects=get_all_loss_functions())
-    model.summary()
-    if cfg.use_scratch_ssd:
-        cfg.use_local_node()
+        if epoch == -1 and fileno == -1:
+            epoch, fileno = self.io.get_latest_epoch()
+            print("Automatically set epoch to epoch {} file {}.".format(epoch, fileno))
 
-    trained_epochs = 0
-    while trained_epochs < cfg.epochs_to_train or cfg.epochs_to_train == -1:
-        # Set epoch to the next file
-        epoch = cfg.get_next_epoch(epoch)
-        train_and_validate_model(cfg, model, epoch)
-        trained_epochs += 1
+        list_name = os.path.splitext(os.path.basename(self.cfg.get_list_file()))[0]
+        pred_filename = self.io.get_pred_path(epoch, fileno, list_name)
 
+        if os.path.isfile(pred_filename):
+            print("Prediction has already been done.")
 
-def orca_eval(cfg):
-    """
-    Core code that evaluates a neural network. The input parameters are the same as for orca_train, so that it is compatible
-    with the .toml file.
-    TODO Should be directly callable on a saved model, so that less arguments are required, and maybe no .toml is needed?
+        else:
+            if self.cfg.zero_center_folder is not None:
+                xs_mean = load_zero_center_data(self)
+            else:
+                xs_mean = None
 
-    Parameters
-    ----------
-    cfg : object Configuration
-        Configuration object containing all the configurable options in the OrcaNet scripts.
+            if self.cfg.use_scratch_ssd:
+                self.cfg.use_local_node()
 
-    """
-    folder_name = cfg.main_folder
-    test_files = cfg.get_val_files()
-    n_bins = cfg.get_n_bins()
-    class_type = cfg.class_type
-    swap_4d_channels = cfg.swap_4d_channels
-    batchsize = cfg.batchsize
-    str_ident = cfg.str_ident
-    list_name = os.path.basename(cfg.get_list_file()).split(".")[0]
-    nn_arch = cfg.get_modeldata().nn_arch
-    epoch = (cfg.initial_epoch, cfg.initial_fileno)
+            model = ks.models.load_model(self.io.get_model_path(epoch, fileno),
+                                         custom_objects=self.cfg.custom_objects)
 
-    if cfg.filter_out_tf_garbage:
-        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
+            make_model_prediction(self, model, xs_mean, pred_filename, samples=None)
 
-    if epoch[0] == -1 and epoch[1] == -1:
-        epoch = cfg.get_latest_epoch()
-        print("Automatically set epoch to epoch {} file {}.".format(epoch[0], epoch[1]))
-
-    if cfg.zero_center_folder is not None:
-        xs_mean = load_zero_center_data(cfg)
-    else:
-        xs_mean = None
-
-    if cfg.use_scratch_ssd:
-        cfg.use_local_node()
-
-    path_of_model = folder_name + 'saved_models/model_epoch_' + str(epoch[0]) + '_file_' + str(epoch[1]) + '.h5'
-    model = ks.models.load_model(path_of_model, custom_objects=get_all_loss_functions())
-    modelname = get_modelname(n_bins, class_type, nn_arch, swap_4d_channels, str_ident)
-    arr_filename = folder_name + 'predictions/pred_model_epoch_{}_file_{}_on_{}_val_files.npy'.format(str(epoch[0]), str(epoch[1]), list_name)
-
-    predict_and_investigate_model_performance(cfg, model, test_files, n_bins, batchsize, class_type, swap_4d_channels,
-                                              str_ident, modelname, xs_mean, arr_filename, folder_name)
+        return pred_filename
