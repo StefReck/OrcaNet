@@ -274,7 +274,7 @@ def add_dense_layers_to_cnn(conv_output_flat, class_type, dropout=0, activation=
         x = Dense(3, activation='softmax', kernel_initializer='he_normal', name='bg_output')(x)
         outputs.append(x)
 
-    elif class_type == 'charged-neutral':  # categorical problem
+    elif class_type == 'cn_classifier':  # categorical problem
         x = Dense(2, activation='softmax', kernel_initializer='he_normal', name='cn_output')(x)
         outputs.append(x)
 
