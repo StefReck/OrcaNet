@@ -189,6 +189,26 @@ def orca_label_modifiers(class_type):
             ys['bg_output'] = categorical_bg.astype(np.float32)
             return ys
 
+    elif class_type == 'cn_classifier':
+        def label_modifier(y_values):
+
+        # label is elec-CC, or elec-NC
+        # categorical [charged, neutral]     -> [1,0] = charged, [0,1] = neutral
+        
+            ys = dict()
+            particle_type, is_cc = y_values['particle_type'], y_values['is_cc']
+            is_elec_cc = np.logical_and(np.abs(particle_type) == 12, is_cc == 1)
+            is_elec_nc = np.logical_and(np.abs(particle_type) == 12, is_cc == 0)
+
+            batchsize = y_values.shape[0]
+            categorical_cn = np.zeros((batchsize,2), dtype='bool')
+
+            categorical_cn[:, 0] = is_elec_cc
+            categorical_cn[:, 1] = is_elec_nc
+
+            ys['cn_output'] = categorical_cn.astype(np.float32)
+            return ys
+
     else:
         raise ValueError('The label ' + str(class_type) + ' in class_type is not available.')
 
